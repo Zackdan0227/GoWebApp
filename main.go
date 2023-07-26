@@ -1,15 +1,21 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
 
 type apiConfig struct {
 	fileserverHits int
+}
+
+type profaneDictionary struct {
+	Replacement map[string]string
 }
 
 func main() {
@@ -32,6 +38,7 @@ func main() {
 	apiRouter := chi.NewRouter()
 
 	apiRouter.Get("/healthz", handlerReadiness)
+	apiRouter.Post("/validate_chirp", handlerValidateChirp)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -90,4 +97,71 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	</html>`, cfg.fileserverHits)
 
 	fmt.Fprintln(w, htmlContent)
+}
+
+func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong when decoding the json data")
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	unclean := strings.ToLower(params.Body)
+	profaneDict := NewProfaneDictionary()
+
+	clean := replaceProfaneWithAsterisks(profaneDict, unclean)
+
+	respondWithJson(w, http.StatusOK, clean)
+	return
+
+}
+
+func replaceProfaneWithAsterisks(dict *profaneDictionary, message string) string {
+	for word, replacement := range dict.Replacement {
+		message = strings.ReplaceAll(message, word, replacement)
+	}
+	return message
+}
+
+func NewProfaneDictionary() *profaneDictionary {
+	return &profaneDictionary{
+		Replacement: map[string]string{
+			"kerfuffle": "****",
+			"sharbert":  "****",
+			"fornax":    "****",
+		},
+	}
+}
+
+func respondWithError(w http.ResponseWriter, statusCode int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	response := map[string]string{"error": message}
+	json.NewEncoder(w).Encode(response)
+}
+
+// func respondWithValid(w http.ResponseWriter, statusCode int, b bool) {
+// 	w.Header().Set("Content-Type", "application/json")
+// 	w.WriteHeader(statusCode)
+// 	response := map[string]bool{"valid": b}
+// 	json.NewEncoder(w).Encode(response)
+// }
+
+func respondWithJson(w http.ResponseWriter, statusCode int, payload string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	response := map[string]string{"cleaned_body": payload}
+	json.NewEncoder(w).Encode(response)
 }
