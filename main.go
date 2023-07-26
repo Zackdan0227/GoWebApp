@@ -124,7 +124,6 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	clean := replaceProfaneWithAsterisks(profaneDict, unclean)
 
 	respondWithJson(w, http.StatusOK, clean)
-	return
 
 }
 
