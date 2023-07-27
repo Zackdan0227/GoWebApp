@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,6 +26,9 @@ type profaneDictionary struct {
 }
 
 func main() {
+	dbg := flag.Bool("debug", false, "Enable debug mode")
+	flag.Parse()
+	fmt.Println("Debug mode: ", *dbg)
 	const port = "8080"
 	const filepathRoot = "."
 	db, err := database.NewDB("database.json")
@@ -52,6 +56,7 @@ func main() {
 	apiRouter.Post("/chirps", apiCfg.handlerPostChirp)
 	apiRouter.Get("/chirps", apiCfg.handlerGetChirps)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
+	apiRouter.Post("/users", apiCfg.handlerPostUser)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -141,6 +146,32 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, models.Chirp{
 		Id:   chirp.Id,
 		Body: chirp.Body,
+	})
+
+}
+
+func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong when decoding the json data")
+		return
+	}
+
+	user, err := cfg.DB.CreateUser(params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create new user to DB")
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, models.User{
+		ID:    user.ID,
+		Email: user.Email,
 	})
 
 }
