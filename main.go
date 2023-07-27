@@ -2,30 +2,43 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
+	"github.com/Zackdan0227/gowebapp/database"
+	"github.com/Zackdan0227/gowebapp/models"
 	"github.com/go-chi/chi/v5"
 )
 
 type apiConfig struct {
 	fileserverHits int
+	DB             *database.DB
 }
 
 type profaneDictionary struct {
 	Replacement map[string]string
 }
 
+type chirpConfig struct {
+	id int
+}
+
 func main() {
 	const port = "8080"
 	const filepathRoot = "."
+	db, err := database.NewDB("database.json")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	r := chi.NewRouter()
 
 	apiCfg := apiConfig{
 		fileserverHits: 0,
+		DB:             db,
 	}
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
@@ -38,7 +51,8 @@ func main() {
 	apiRouter := chi.NewRouter()
 
 	apiRouter.Get("/healthz", handlerReadiness)
-	apiRouter.Post("/validate_chirp", handlerValidateChirp)
+	apiRouter.Post("/chirps", apiCfg.handlerPostChirp)
+	apiRouter.Get("/chirps", apiCfg.handlerGetChirps)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -99,7 +113,7 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, htmlContent)
 }
 
-func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
 	}
@@ -113,18 +127,40 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(params.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+	clean, err := validateChirp(params.Body)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	unclean := strings.ToLower(params.Body)
+	chirp, err := cfg.DB.CreateChirp(clean)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create chirp to DB")
+	}
+
+	respondChirpWithJson(w, http.StatusCreated, models.Chirp{
+		Id:   chirp.Id,
+		Body: chirp.Body,
+	})
+
+}
+
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+
+}
+
+func validateChirp(body string) (string, error) {
+	const chirpMaxLength = 140
+	if len(body) > chirpMaxLength {
+		return "", errors.New("chirp is too long")
+	}
+
+	unclean := strings.ToLower(body)
 	profaneDict := NewProfaneDictionary()
 
 	clean := replaceProfaneWithAsterisks(profaneDict, unclean)
 
-	respondWithJson(w, http.StatusOK, clean)
-
+	return clean, nil
 }
 
 func replaceProfaneWithAsterisks(dict *profaneDictionary, message string) string {
@@ -158,9 +194,12 @@ func respondWithError(w http.ResponseWriter, statusCode int, message string) {
 // 	json.NewEncoder(w).Encode(response)
 // }
 
-func respondWithJson(w http.ResponseWriter, statusCode int, payload string) {
+func respondChirpWithJson(w http.ResponseWriter, statusCode int, chirp models.Chirp) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	response := map[string]string{"cleaned_body": payload}
+	response := models.Chirp{
+		Id:   chirp.Id,
+		Body: chirp.Body,
+	}
 	json.NewEncoder(w).Encode(response)
 }
