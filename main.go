@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Zackdan0227/gowebapp/database"
@@ -50,6 +51,7 @@ func main() {
 	apiRouter.Get("/healthz", handlerReadiness)
 	apiRouter.Post("/chirps", apiCfg.handlerPostChirp)
 	apiRouter.Get("/chirps", apiCfg.handlerGetChirps)
+	apiRouter.Get("/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -133,6 +135,7 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 	chirp, err := cfg.DB.CreateChirp(clean)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Could not create chirp to DB")
+		return
 	}
 
 	respondWithJSON(w, http.StatusCreated, models.Chirp{
@@ -146,6 +149,7 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := cfg.DB.GetChirps()
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+		return
 	}
 	chirps := []models.Chirp{}
 	for _, dbChirp := range dbChirps {
@@ -160,6 +164,32 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	})
 
 	respondWithJSON(w, http.StatusOK, chirps)
+}
+
+func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.DB.GetChirps()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+		return
+	}
+	chirp := models.Chirp{}
+	idString := chi.URLParam(r, "chirpID")
+	id, err := strconv.Atoi(idString)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not convert chirpID from string to int")
+		return
+	}
+	for _, dbChirp := range dbChirps {
+		if dbChirp.Id == id {
+			chirp = models.Chirp{
+				Id:   dbChirp.Id,
+				Body: dbChirp.Body,
+			}
+			respondWithJSON(w, http.StatusOK, chirp)
+			return
+		}
+	}
+	respondWithError(w, http.StatusNotFound, fmt.Sprintf("chirpID %d not found in db", id))
 }
 
 func validateChirp(body string) (string, error) {
