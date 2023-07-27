@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/Zackdan0227/gowebapp/database"
@@ -134,7 +135,7 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "Could not create chirp to DB")
 	}
 
-	respondChirpWithJson(w, http.StatusCreated, models.Chirp{
+	respondWithJSON(w, http.StatusCreated, models.Chirp{
 		Id:   chirp.Id,
 		Body: chirp.Body,
 	})
@@ -142,7 +143,23 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.DB.GetChirps()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+	}
+	chirps := []models.Chirp{}
+	for _, dbChirp := range dbChirps {
+		chirps = append(chirps, models.Chirp{
+			Id:   dbChirp.Id,
+			Body: dbChirp.Body,
+		})
+	}
 
+	sort.Slice(chirps, func(i, j int) bool {
+		return chirps[i].Id < chirps[j].Id
+	})
+
+	respondWithJSON(w, http.StatusOK, chirps)
 }
 
 func validateChirp(body string) (string, error) {
@@ -183,19 +200,14 @@ func respondWithError(w http.ResponseWriter, statusCode int, message string) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// func respondWithValid(w http.ResponseWriter, statusCode int, b bool) {
-// 	w.Header().Set("Content-Type", "application/json")
-// 	w.WriteHeader(statusCode)
-// 	response := map[string]bool{"valid": b}
-// 	json.NewEncoder(w).Encode(response)
-// }
-
-func respondChirpWithJson(w http.ResponseWriter, statusCode int, chirp models.Chirp) {
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	response := models.Chirp{
-		Id:   chirp.Id,
-		Body: chirp.Body,
+	dat, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+		return
 	}
-	json.NewEncoder(w).Encode(response)
+	w.WriteHeader(code)
+	w.Write(dat)
 }
