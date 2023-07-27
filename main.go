@@ -22,10 +22,6 @@ type profaneDictionary struct {
 	Replacement map[string]string
 }
 
-type chirpConfig struct {
-	id int
-}
-
 func main() {
 	const port = "8080"
 	const filepathRoot = "."
