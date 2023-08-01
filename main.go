@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/Zackdan0227/gowebapp/database"
 	"github.com/Zackdan0227/gowebapp/models"
 	"github.com/go-chi/chi/v5"
@@ -57,6 +59,7 @@ func main() {
 	apiRouter.Get("/chirps", apiCfg.handlerGetChirps)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
 	apiRouter.Post("/users", apiCfg.handlerPostUser)
+	apiRouter.Post("/login", apiCfg.handlerUserLogin)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -152,7 +155,45 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	cost := 12
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Error decoding JSON: %v", err))
+		return
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(params.Password), cost)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong when hashing user password")
+		return
+	}
+
+	user, err := cfg.DB.CreateUser(params.Email, hashedPassword)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create new user to DB")
+		return
+	}
+
+	response := struct {
+		ID    int    `json:"id"`
 		Email string `json:"email"`
+	}{
+		ID:    user.ID,
+		Email: user.Email,
+	}
+	respondWithJSON(w, http.StatusCreated, response)
+
+}
+
+func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -163,17 +204,25 @@ func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := cfg.DB.CreateUser(params.Email)
+	user, err := cfg.DB.GetUserByEmail(params.Email)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not create new user to DB")
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	respondWithJSON(w, http.StatusCreated, models.User{
+	if bcrypt.CompareHashAndPassword(user.Password, []byte(params.Password)) != nil {
+		respondWithError(w, http.StatusUnauthorized, "password does not match")
+		return
+	}
+
+	response := struct {
+		ID    int    `json:"id"`
+		Email string `json:"email"`
+	}{
 		ID:    user.ID,
 		Email: user.Email,
-	})
-
+	}
+	respondWithJSON(w, http.StatusOK, response)
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {

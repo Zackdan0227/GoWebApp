@@ -58,15 +58,22 @@ func (db *DB) CreateChirp(body string) (models.Chirp, error) {
 	return chirp, nil
 }
 
-func (db *DB) CreateUser(body string) (models.User, error) {
+func (db *DB) CreateUser(body string, pass []byte) (models.User, error) {
 	dbStructure, err := db.loadDB()
 	if err != nil {
 		return models.User{}, err
 	}
+
+	for _, user := range dbStructure.Users {
+		if user.Email == body {
+			return models.User{}, errors.New("email already taken")
+		}
+	}
 	id := len(dbStructure.Users) + 1
 	user := models.User{
-		ID:    id,
-		Email: body,
+		ID:       id,
+		Email:    body,
+		Password: pass,
 	}
 	dbStructure.Users[id] = user
 
@@ -76,6 +83,21 @@ func (db *DB) CreateUser(body string) (models.User, error) {
 	}
 
 	return user, nil
+}
+
+func (db *DB) GetUserByEmail(email string) (models.User, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return models.User{}, err
+	}
+
+	for _, user := range dbStructure.Users {
+		if user.Email == email {
+			return user, nil
+		}
+	}
+
+	return models.User{}, errors.New("user not found")
 }
 
 // GetChirps returns all chirps in the database
