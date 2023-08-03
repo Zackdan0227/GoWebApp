@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/Zackdan0227/gowebapp/models"
@@ -98,6 +99,30 @@ func (db *DB) GetUserByEmail(email string) (models.User, error) {
 	}
 
 	return models.User{}, errors.New("user not found")
+}
+
+func (db *DB) UpdateUser(userID string, email string, password []byte) (models.User, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return models.User{}, err
+	}
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		return models.User{}, err
+	}
+	for i, user := range dbStructure.Users {
+		if user.ID == id {
+			user.Email = email
+			user.Password = password
+			dbStructure.Users[i] = user
+			err := db.writeDB(dbStructure)
+			if err != nil {
+				return models.User{}, err
+			}
+			return user, nil
+		}
+	}
+	return models.User{}, errors.New("unable to find user in db")
 }
 
 // GetChirps returns all chirps in the database

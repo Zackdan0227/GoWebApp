@@ -7,30 +7,42 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Zackdan0227/gowebapp/database"
 	"github.com/Zackdan0227/gowebapp/models"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 )
 
 type apiConfig struct {
 	fileserverHits int
 	DB             *database.DB
+	jwtSecret      string
 }
 
 type profaneDictionary struct {
 	Replacement map[string]string
 }
 
+const cost = 12
+
 func main() {
+
 	dbg := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
 	fmt.Println("Debug mode: ", *dbg)
+
+	godotenv.Load()
+	jwtSecret := os.Getenv("JWT_SECRET")
+
 	const port = "8080"
 	const filepathRoot = "."
 	db, err := database.NewDB("database.json")
@@ -43,6 +55,7 @@ func main() {
 	apiCfg := apiConfig{
 		fileserverHits: 0,
 		DB:             db,
+		jwtSecret:      jwtSecret,
 	}
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
@@ -60,6 +73,7 @@ func main() {
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
 	apiRouter.Post("/users", apiCfg.handlerPostUser)
 	apiRouter.Post("/login", apiCfg.handlerUserLogin)
+	apiRouter.Put("/users", apiCfg.handlerUpdateUser)
 
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
@@ -158,7 +172,7 @@ func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Email    string `json:"email"`
 	}
-	cost := 12
+
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -192,8 +206,9 @@ func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
+		Password           string `json:"password"`
+		Email              string `json:"email"`
+		Expires_in_seconds int    `json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -204,6 +219,7 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//get user by email from backend
 	user, err := cfg.DB.GetUserByEmail(params.Email)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -215,12 +231,107 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if params.Expires_in_seconds == 0 || params.Expires_in_seconds > 86400 {
+		params.Expires_in_seconds = 86400
+	}
+
+	currentTime := time.Now().UTC()
+	//create jwt
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy",
+		IssuedAt:  jwt.NewNumericDate(currentTime),
+		ExpiresAt: jwt.NewNumericDate(currentTime.Add(time.Second * time.Duration(params.Expires_in_seconds))),
+		Subject:   fmt.Sprint(user.ID),
+	})
+	tokenString, err := token.SignedString([]byte(cfg.jwtSecret))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := struct {
+		ID    int    `json:"id"`
+		Email string `json:"email"`
+		Token string `json:"token"`
+	}{
+		ID:    user.ID,
+		Email: user.Email,
+		Token: tokenString,
+	}
+	respondWithJSON(w, http.StatusOK, response)
+}
+
+type Claims struct {
+	jwt.RegisteredClaims
+}
+
+func validateJWT(jwtSecret []byte, r *http.Request) (string, error) {
+	requestToken := r.Header.Get("Authorization")
+
+	tokenString := strings.TrimPrefix(requestToken, "Bearer ")
+
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(jwtSecret), nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+	if !token.Valid {
+		err := errors.New("token is invalid")
+		return "", err
+	}
+	currentTime := time.Now().UTC()
+	if claims.ExpiresAt != nil && currentTime.After(claims.ExpiresAt.Time) {
+		err := errors.New("token has expired")
+		return "", err
+	}
+	return claims.Subject, nil
+}
+
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+
+	userID, err := validateJWT([]byte(cfg.jwtSecret), r)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong when decoding the json data")
+		return
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(params.Password), cost)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong when hashing user password")
+		return
+	}
+	// Use the userID to update the user in the database
+	updatedUser, err := cfg.DB.UpdateUser(userID, params.Email, hashedPassword)
+
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not update user password/email")
+		return
+	}
+
 	response := struct {
 		ID    int    `json:"id"`
 		Email string `json:"email"`
 	}{
-		ID:    user.ID,
-		Email: user.Email,
+		ID:    updatedUser.ID,
+		Email: updatedUser.Email,
 	}
 	respondWithJSON(w, http.StatusOK, response)
 }
@@ -252,7 +363,6 @@ func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
 		return
 	}
-	chirp := models.Chirp{}
 	idString := chi.URLParam(r, "chirpID")
 	id, err := strconv.Atoi(idString)
 	if err != nil {
@@ -261,7 +371,7 @@ func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request
 	}
 	for _, dbChirp := range dbChirps {
 		if dbChirp.Id == id {
-			chirp = models.Chirp{
+			chirp := models.Chirp{
 				Id:   dbChirp.Id,
 				Body: dbChirp.Body,
 			}
