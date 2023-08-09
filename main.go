@@ -36,18 +36,26 @@ const cost = 12
 
 func main() {
 
-	dbg := flag.Bool("debug", false, "Enable debug mode")
-	flag.Parse()
-	fmt.Println("Debug mode: ", *dbg)
-
 	godotenv.Load()
 	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
 
 	const port = "8080"
 	const filepathRoot = "."
 	db, err := database.NewDB("database.json")
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	dbg := flag.Bool("debug", false, "Enable debug mode")
+	flag.Parse()
+	if dbg != nil && *dbg {
+		err := db.ResetDB()
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	r := chi.NewRouter()
@@ -74,7 +82,8 @@ func main() {
 	apiRouter.Post("/users", apiCfg.handlerPostUser)
 	apiRouter.Post("/login", apiCfg.handlerUserLogin)
 	apiRouter.Put("/users", apiCfg.handlerUpdateUser)
-
+	apiRouter.Post("/refresh", apiCfg.handlerRefreshToken)
+	apiRouter.Post("/revoke", apiCfg.handlerRevoke)
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
 
@@ -206,9 +215,8 @@ func (cfg *apiConfig) handlerPostUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password           string `json:"password"`
-		Email              string `json:"email"`
-		Expires_in_seconds int    `json:"expires_in_seconds"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -231,32 +239,42 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if params.Expires_in_seconds == 0 || params.Expires_in_seconds > 86400 {
-		params.Expires_in_seconds = 86400
-	}
-
 	currentTime := time.Now().UTC()
 	//create jwt
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Issuer:    "chirpy",
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy-access",
 		IssuedAt:  jwt.NewNumericDate(currentTime),
-		ExpiresAt: jwt.NewNumericDate(currentTime.Add(time.Second * time.Duration(params.Expires_in_seconds))),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		Subject:   fmt.Sprint(user.ID),
 	})
-	tokenString, err := token.SignedString([]byte(cfg.jwtSecret))
+	accessTokenString, err := accessToken.SignedString([]byte(cfg.jwtSecret))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy-refresh",
+		IssuedAt:  jwt.NewNumericDate(currentTime),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 24 * 60)),
+		Subject:   fmt.Sprint(user.ID),
+	})
+	refreshTokenString, err := refreshToken.SignedString([]byte(cfg.jwtSecret))
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	response := struct {
-		ID    int    `json:"id"`
-		Email string `json:"email"`
-		Token string `json:"token"`
+		ID            int    `json:"id"`
+		Email         string `json:"email"`
+		Token         string `json:"token"`
+		Refresh_token string `json:"refresh_token"`
 	}{
-		ID:    user.ID,
-		Email: user.Email,
-		Token: tokenString,
+		ID:            user.ID,
+		Email:         user.Email,
+		Token:         accessTokenString,
+		Refresh_token: refreshTokenString,
 	}
 	respondWithJSON(w, http.StatusOK, response)
 }
@@ -272,9 +290,6 @@ func validateJWT(jwtSecret []byte, r *http.Request) (string, error) {
 
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
-		}
 		return []byte(jwtSecret), nil
 	})
 
@@ -283,6 +298,11 @@ func validateJWT(jwtSecret []byte, r *http.Request) (string, error) {
 	}
 	if !token.Valid {
 		err := errors.New("token is invalid")
+		return "", err
+	}
+
+	if claims.Issuer == "chirpy-refresh" {
+		err := errors.New("refresh is not allowed")
 		return "", err
 	}
 	currentTime := time.Now().UTC()
@@ -334,6 +354,91 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 		Email: updatedUser.Email,
 	}
 	respondWithJSON(w, http.StatusOK, response)
+}
+
+func (cfg *apiConfig) handlerRefreshToken(w http.ResponseWriter, r *http.Request) {
+	requestToken := r.Header.Get("Authorization")
+
+	tokenString := strings.TrimPrefix(requestToken, "Bearer ")
+
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(cfg.jwtSecret), nil
+	})
+
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !token.Valid {
+		respondWithError(w, http.StatusUnauthorized, "token is invalid")
+		return
+	}
+
+	if claims.Issuer != "chirpy-refresh" {
+		respondWithError(w, http.StatusUnauthorized, "not a refresh token")
+		fmt.Println(claims.Issuer)
+		return
+	}
+
+	isRevoked, err := cfg.DB.IsTokenRevoked(tokenString)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't check session")
+		return
+	}
+	if isRevoked {
+		respondWithError(w, http.StatusUnauthorized, "Refresh token is revoked")
+		return
+	}
+	userID := claims.Subject
+	currentTime := time.Now().UTC()
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy-access",
+		IssuedAt:  jwt.NewNumericDate(currentTime),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		Subject:   userID,
+	})
+	accessTokenString, err := accessToken.SignedString([]byte(cfg.jwtSecret))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := struct {
+		Token string `json:"token"`
+	}{
+		Token: accessTokenString,
+	}
+	respondWithJSON(w, http.StatusOK, response)
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("not auth header included in request")
+	}
+	splitAuth := strings.Split(authHeader, " ")
+	if len(splitAuth) < 2 || splitAuth[0] != "Bearer" {
+		return "", errors.New("malformed authorization header")
+	}
+
+	return splitAuth[1], nil
+}
+
+func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't find JWT")
+		return
+	}
+
+	err = cfg.DB.RevokeToken(refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't revoke session")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, struct{}{})
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/Zackdan0227/gowebapp/models"
 )
@@ -15,8 +16,9 @@ type DB struct {
 	mux  *sync.RWMutex
 }
 type DBStructure struct {
-	Chirps map[int]models.Chirp `json:"chirps"`
-	Users  map[int]models.User  `json:"users"`
+	Chirps      map[int]models.Chirp         `json:"chirps"`
+	Users       map[int]models.User          `json:"users"`
+	Revocations map[string]models.Revocation `json:"revocations"`
 }
 
 // NewDB creates a new database connection
@@ -29,11 +31,18 @@ func NewDB(path string) (*DB, error) {
 	err := db.ensureDB()
 	return db, err
 }
-
+func (db *DB) ResetDB() error {
+	err := os.Remove(db.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return db.ensureDB()
+}
 func (db *DB) createDB() error {
 	dbStructure := DBStructure{
-		Chirps: map[int]models.Chirp{},
-		Users:  map[int]models.User{},
+		Chirps:      map[int]models.Chirp{},
+		Users:       map[int]models.User{},
+		Revocations: map[string]models.Revocation{},
 	}
 	return db.writeDB(dbStructure)
 }
@@ -110,19 +119,20 @@ func (db *DB) UpdateUser(userID string, email string, password []byte) (models.U
 	if err != nil {
 		return models.User{}, err
 	}
-	for i, user := range dbStructure.Users {
-		if user.ID == id {
-			user.Email = email
-			user.Password = password
-			dbStructure.Users[i] = user
-			err := db.writeDB(dbStructure)
-			if err != nil {
-				return models.User{}, err
-			}
-			return user, nil
-		}
+
+	user, ok := dbStructure.Users[id]
+	if !ok {
+		return models.User{}, errors.New("user does not exist")
 	}
-	return models.User{}, errors.New("unable to find user in db")
+
+	user.Email = email
+	user.Password = password
+	dbStructure.Users[id] = user
+	err = db.writeDB(dbStructure)
+	if err != nil {
+		return models.User{}, err
+	}
+	return user, nil
 }
 
 // GetChirps returns all chirps in the database
@@ -185,4 +195,42 @@ func (db *DB) writeDB(dbStructure DBStructure) error {
 	}
 
 	return nil
+}
+
+func (db *DB) RevokeToken(token string) error {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	revocation := models.Revocation{
+		Token:     token,
+		RevokedAt: time.Now().UTC(),
+	}
+	dbStructure.Revocations[token] = revocation
+
+	err = db.writeDB(dbStructure)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *DB) IsTokenRevoked(token string) (bool, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return false, err
+	}
+
+	revocation, ok := dbStructure.Revocations[token]
+	if !ok {
+		return false, nil
+	}
+
+	if revocation.RevokedAt.IsZero() {
+		return false, nil
+	}
+
+	return true, nil
 }
