@@ -26,6 +26,7 @@ type apiConfig struct {
 	fileserverHits int
 	DB             *database.DB
 	jwtSecret      string
+	polkaKey       string
 }
 
 type profaneDictionary struct {
@@ -38,8 +39,12 @@ func main() {
 
 	godotenv.Load()
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaAPIKey := os.Getenv("POLKA_KEY")
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+	if polkaAPIKey == "" {
+		log.Fatal("POLKA_KEY environment variable is not set")
 	}
 
 	const port = "8080"
@@ -64,6 +69,7 @@ func main() {
 		fileserverHits: 0,
 		DB:             db,
 		jwtSecret:      jwtSecret,
+		polkaKey:       polkaAPIKey,
 	}
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
@@ -87,6 +93,9 @@ func main() {
 
 	apiRouter.Post("/refresh", apiCfg.handlerRefreshToken)
 	apiRouter.Post("/revoke", apiCfg.handlerRevoke)
+
+	apiRouter.Post("/polka/webhooks", apiCfg.handlerPolkaWebhooks)
+
 	adminRouter := chi.NewRouter()
 	adminRouter.Get("/metrics", apiCfg.handlerMetrics)
 
@@ -344,13 +353,53 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 		Token         string `json:"token"`
 		Refresh_token string `json:"refresh_token"`
+		Is_chirpy_red bool   `json:"is_chirpy_red"`
 	}{
 		ID:            user.ID,
 		Email:         user.Email,
 		Token:         accessTokenString,
 		Refresh_token: refreshTokenString,
+		Is_chirpy_red: user.Is_chirpy_red,
 	}
 	respondWithJSON(w, http.StatusOK, response)
+}
+
+func (cfg *apiConfig) handlerPolkaWebhooks(w http.ResponseWriter, r *http.Request) {
+	type RequestBody struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID int `json:"user_id"`
+		} `json:"data"`
+	}
+	requestKey := r.Header.Get("Authorization")
+
+	requestApiKey := strings.TrimPrefix(requestKey, "ApiKey ")
+
+	if requestApiKey != cfg.polkaKey {
+		respondWithError(w, http.StatusUnauthorized, "incorrect api key")
+		return
+	}
+
+	var reqBody RequestBody
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if reqBody.Event != "user.upgraded" {
+		respondWithJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+
+	err := cfg.DB.UpgradeChirpyRed(reqBody.Data.UserID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, struct{}{})
+
 }
 
 type Claims struct {
@@ -421,11 +470,13 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	response := struct {
-		ID    int    `json:"id"`
-		Email string `json:"email"`
+		ID            int    `json:"id"`
+		Email         string `json:"email"`
+		Is_chirpy_red bool   `json:"is_chirpy_red"`
 	}{
-		ID:    updatedUser.ID,
-		Email: updatedUser.Email,
+		ID:            updatedUser.ID,
+		Email:         updatedUser.Email,
+		Is_chirpy_red: updatedUser.Is_chirpy_red,
 	}
 	respondWithJSON(w, http.StatusOK, response)
 }
@@ -515,24 +566,53 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, struct{}{})
 }
 
+// plural GET endpoint for returning chirps, accepts optional query parameter 'author_id',
+// If the author_id query parameter is provided, the endpoint should return only the chirps for that author.
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := cfg.DB.GetChirps()
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
 		return
 	}
-	chirps := []models.Chirp{}
-	for _, dbChirp := range dbChirps {
-		chirps = append(chirps, models.Chirp{
-			Id:        dbChirp.Id,
-			Body:      dbChirp.Body,
-			Author_id: dbChirp.Author_id,
-		})
+	author_id := r.URL.Query().Get("author_id")
+
+	var chirps []models.Chirp
+	if author_id != "" {
+		authorID, err := strconv.Atoi(author_id)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "error converting author_id string to int")
+			return
+		}
+		for _, dbChirp := range dbChirps {
+			if dbChirp.Author_id == authorID {
+				chirps = append(chirps, models.Chirp{
+					Id:        dbChirp.Id,
+					Body:      dbChirp.Body,
+					Author_id: dbChirp.Author_id,
+				})
+			}
+		}
+	} else {
+		for _, dbChirp := range dbChirps {
+			chirps = append(chirps, models.Chirp{
+				Id:        dbChirp.Id,
+				Body:      dbChirp.Body,
+				Author_id: dbChirp.Author_id,
+			})
+		}
 	}
 
-	sort.Slice(chirps, func(i, j int) bool {
-		return chirps[i].Id < chirps[j].Id
-	})
+	// Handle the sort query parameter.
+	sortOrder := r.URL.Query().Get("sort")
+	if sortOrder == "desc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].Id > chirps[j].Id
+		})
+	} else { // default to "asc"
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].Id < chirps[j].Id
+		})
+	}
 
 	respondWithJSON(w, http.StatusOK, chirps)
 }

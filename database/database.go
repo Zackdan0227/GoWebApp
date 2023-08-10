@@ -81,11 +81,13 @@ func (db *DB) CreateUser(body string, pass []byte) (models.User, error) {
 			return models.User{}, errors.New("email already taken")
 		}
 	}
+
 	id := len(dbStructure.Users) + 1
 	user := models.User{
-		ID:       id,
-		Email:    body,
-		Password: pass,
+		ID:            id,
+		Email:         body,
+		Password:      pass,
+		Is_chirpy_red: false,
 	}
 	dbStructure.Users[id] = user
 
@@ -162,6 +164,29 @@ func (db *DB) DeleteChirpByID(chirpID int) error {
 	}
 
 	delete(dbStructure.Chirps, chirpID)
+
+	return nil
+}
+
+func (db *DB) UpgradeChirpyRed(userID int) error {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	user, ok := dbStructure.Users[userID]
+	if !ok {
+		return errors.New("user does not exist")
+	}
+
+	if !user.Is_chirpy_red {
+		user.Is_chirpy_red = true
+		dbStructure.Users[userID] = user
+		err = db.writeDB(dbStructure)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
