@@ -3,6 +3,7 @@ package database
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -48,15 +49,16 @@ func (db *DB) createDB() error {
 }
 
 // CreateChirp creates a new models.Chirp and saves it to disk
-func (db *DB) CreateChirp(body string) (models.Chirp, error) {
+func (db *DB) CreateChirp(body string, userID int) (models.Chirp, error) {
 	dbStructure, err := db.loadDB()
 	if err != nil {
 		return models.Chirp{}, err
 	}
 	id := len(dbStructure.Chirps) + 1
 	chirp := models.Chirp{
-		Id:   id,
-		Body: body,
+		Id:        id,
+		Body:      body,
+		Author_id: userID,
 	}
 	dbStructure.Chirps[id] = chirp
 
@@ -148,6 +150,20 @@ func (db *DB) GetChirps() ([]models.Chirp, error) {
 	}
 
 	return chirps, nil
+}
+func (db *DB) DeleteChirpByID(chirpID int) error {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	if _, ok := dbStructure.Chirps[chirpID]; !ok {
+		return fmt.Errorf("chirp with ID %d not found", chirpID)
+	}
+
+	delete(dbStructure.Chirps, chirpID)
+
+	return nil
 }
 
 // ensureDB creates a new database file if it doesn't exist

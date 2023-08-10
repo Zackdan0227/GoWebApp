@@ -79,9 +79,12 @@ func main() {
 	apiRouter.Post("/chirps", apiCfg.handlerPostChirp)
 	apiRouter.Get("/chirps", apiCfg.handlerGetChirps)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
+	apiRouter.Delete("/chirps/{chirpID}", apiCfg.handlerDeleteChirp)
+
 	apiRouter.Post("/users", apiCfg.handlerPostUser)
 	apiRouter.Post("/login", apiCfg.handlerUserLogin)
 	apiRouter.Put("/users", apiCfg.handlerUpdateUser)
+
 	apiRouter.Post("/refresh", apiCfg.handlerRefreshToken)
 	apiRouter.Post("/revoke", apiCfg.handlerRevoke)
 	adminRouter := chi.NewRouter()
@@ -162,17 +165,88 @@ func (cfg *apiConfig) handlerPostChirp(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	chirp, err := cfg.DB.CreateChirp(clean)
+	userID, err := validateJWT([]byte(cfg.jwtSecret), r)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	chirp, err := cfg.DB.CreateChirp(clean, id)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Could not create chirp to DB")
 		return
 	}
 
 	respondWithJSON(w, http.StatusCreated, models.Chirp{
-		Id:   chirp.Id,
-		Body: chirp.Body,
+		Id:        chirp.Id,
+		Body:      chirp.Body,
+		Author_id: chirp.Author_id,
 	})
+
+}
+
+// modified from getChirpByID to get a Chirp
+func (cfg *apiConfig) getChirpByID(id int) (*models.Chirp, error) {
+	dbChirps, err := cfg.DB.GetChirps()
+	if err != nil {
+		return nil, err
+	}
+	for _, dbChirp := range dbChirps {
+		if dbChirp.Id == id {
+			chirp := &models.Chirp{
+				Id:        dbChirp.Id,
+				Body:      dbChirp.Body,
+				Author_id: dbChirp.Author_id,
+			}
+			return chirp, nil
+		}
+	}
+	return nil, fmt.Errorf("chirpID %d not found in db", id)
+}
+
+// hanlder for deleting a chirp from database
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	userID, err := validateJWT([]byte(cfg.jwtSecret), r)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	requestID, err := strconv.Atoi(userID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not convert id from string to int")
+		return
+	}
+
+	idString := chi.URLParam(r, "chirpID")
+	chirpid, err := strconv.Atoi(idString)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not convert chirpID from string to int")
+		return
+	}
+
+	chirp, err := cfg.getChirpByID(chirpid)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	if requestID != chirp.Author_id {
+		respondWithError(w, http.StatusForbidden, "user is not the author of chirp to be deleted")
+		return
+	}
+
+	err = cfg.DB.DeleteChirpByID(chirpid)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, struct{}{})
 
 }
 
@@ -450,8 +524,9 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	chirps := []models.Chirp{}
 	for _, dbChirp := range dbChirps {
 		chirps = append(chirps, models.Chirp{
-			Id:   dbChirp.Id,
-			Body: dbChirp.Body,
+			Id:        dbChirp.Id,
+			Body:      dbChirp.Body,
+			Author_id: dbChirp.Author_id,
 		})
 	}
 
@@ -463,28 +538,18 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := cfg.DB.GetChirps()
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
-		return
-	}
 	idString := chi.URLParam(r, "chirpID")
 	id, err := strconv.Atoi(idString)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "could not convert chirpID from string to int")
 		return
 	}
-	for _, dbChirp := range dbChirps {
-		if dbChirp.Id == id {
-			chirp := models.Chirp{
-				Id:   dbChirp.Id,
-				Body: dbChirp.Body,
-			}
-			respondWithJSON(w, http.StatusOK, chirp)
-			return
-		}
+	chirp, err := cfg.getChirpByID(id)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
 	}
-	respondWithError(w, http.StatusNotFound, fmt.Sprintf("chirpID %d not found in db", id))
+	respondWithJSON(w, http.StatusOK, chirp)
 }
 
 func validateChirp(body string) (string, error) {
